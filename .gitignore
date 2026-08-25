@@ -1,0 +1,14 @@
+# Скомпилированные бинарники (Sketch -> Export Compiled Binary)
+*.bin
+*.elf
+*.map
+*.hex
+
+# Каталоги сборки Arduino IDE / arduino-cli
+build/
+.build/
+*.arduino.*
+
+# Служебное
+.DS_Store
+Thumbs.db
