@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.1.0
+ * WiFi консольный сервер на ESP8266 — v1.2.0
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -20,6 +20,8 @@
  * - mDNS: esp-console.local; captive portal на точке доступа
  * - Веб-интерфейс /settings и OTA /update за Basic Auth с блокировкой
  *   после 5 неудачных попыток
+ * - /log: выгрузка буфера истории файлом — готовый протокол работ
+ *   по железке. За авторизацией: в консоль уходят набранные пароли
  * - OLED 128x64: IP, КРУПНО текущая скорость, батарея, статус telnet.
  *   Гаснет через 60 с простоя, будится кнопкой или подключением клиента
  *
@@ -75,7 +77,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -291,12 +293,19 @@ void historyPush(const uint8_t* d, size_t n) {
 // удержание SPACE дольше длительности символа и есть break condition.
 uint32_t breakFlashUntil = 0;
 
+void serialToHistory();   // объявление: нужна ниже по тексту, а вызывается здесь
+
 void sendBreak(uint16_t ms) {
   Serial.flush();
   pinMode(PIN_UART_TX, OUTPUT);      // GPIO1 отцепляется от UART0
   digitalWrite(PIN_UART_TX, LOW);
   delay(ms);
   digitalWrite(PIN_UART_TX, HIGH);
+  // Железка отвечает на break сразу, ещё пока он держится, и её первые
+  // строки уже лежат в приёмном буфере UART. Serial.begin() ниже
+  // пересоздаёт буфер пустым, поэтому забираем их ДО переинициализации —
+  // иначе теряется ровно то, ради чего break и посылался.
+  serialToHistory();
   Serial.begin(currentSerialBaud()); // begin() возвращает пин под UART0
   breakFlashUntil = millis() + 1500;
   wakeScreen();
@@ -647,7 +656,8 @@ void handleSettingsGet() {
     "<input type='password' name='new_pin2' maxlength='8'></fieldset>"));
 
   emit(F("<button type='submit'>Сохранить</button></form>"));
-  emit(F("<p><a class='btn' href='/update'>OTA-обновление прошивки</a></p>"));
+  emit(F("<p><a class='btn' href='/log'>Скачать лог консоли</a> "
+         "<a class='btn' href='/update'>OTA-обновление прошивки</a></p>"));
 
   emit(F("<p class='sys'>Прошивка " FW_VERSION " &middot; uptime "));
   emit(uptimeStr());
@@ -659,6 +669,32 @@ void handleSettingsGet() {
 
   emitFlush();
   server.sendContent("");
+}
+
+// Выгрузка буфера истории файлом. За авторизацией не только ради приличия:
+// в консоль во время настройки уходят пароли, которые вы набираете руками,
+// и всё это лежит в буфере.
+void handleLog() {
+  if (!checkAuth()) return;
+
+  // Снимок границы: консоль продолжает писать, пока мы отдаём файл, и без
+  // фиксации конца отдали бы больше, чем объявили в Content-Length.
+  // Позиция своя — histRead принадлежит telnet-читателю, его не трогаем.
+  uint32_t end  = histTotal;
+  uint32_t have = (end < HISTORY_SIZE) ? end : (uint32_t)HISTORY_SIZE;
+  uint32_t pos  = end - have;
+
+  server.sendHeader("Content-Disposition", "attachment; filename=\"console.log\"");
+  server.setContentLength(have);
+  server.send(200, "text/plain", "");
+
+  while (pos != end) {
+    size_t off   = pos % HISTORY_SIZE;
+    size_t chunk = smin((size_t)(end - pos), HISTORY_SIZE - off);  // не через край кольца
+    chunk = smin(chunk, (size_t)512);
+    server.sendContent((const char*)&history[off], chunk);
+    pos += chunk;
+  }
 }
 
 // ---------- WiFi ----------
@@ -906,6 +942,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/settings", HTTP_GET, handleSettingsGet);
   server.on("/settings", HTTP_POST, handleSettingsPost);
+  server.on("/log", HTTP_GET, handleLog);
   server.onNotFound(handleNotFound);
   httpUpdater.setup(&server, "/update", AUTH_USER, settings.pin);
   server.begin();
