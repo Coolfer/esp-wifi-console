@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.2.0
+ * WiFi консольный сервер на ESP8266 — v1.2.1
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -17,7 +17,7 @@
  * - Новый telnet-клиент вытесняет старого (роуминг по стойке рвёт TCP,
  *   а отказ в подключении заблокировал бы вас же до перезагрузки)
  * - AP всегда; STA поднимается только если задан домашний SSID
- * - mDNS: esp-console.local; captive portal на точке доступа
+ * - mDNS: esp-console.local (captive portal выключен, см. CAPTIVE_PORTAL)
  * - Веб-интерфейс /settings и OTA /update за Basic Auth с блокировкой
  *   после 5 неудачных попыток
  * - /log: выгрузка буфера истории файлом — готовый протокол работ
@@ -67,17 +67,29 @@
  * пакет плат ESP8266.
  */
 
+// ---------- конфигурация сборки ----------
+// Captive portal выключен намеренно. Всплывающее окно "Вход в сеть" на
+// Android — это урезанный WebView, а не браузер: диалог Basic Auth он
+// показывать не умеет и на ответ 401 от /settings выдаёт
+// ERR_HTTP_RESPONSE_CODE_FAILURE. Пока авторизация построена на Basic
+// Auth, окно только мешает. Без DNS-перехвата телефон просто пометит
+// сеть как "без доступа в интернет" и оставит мобильный трафик себе.
+// Ставить 1 имеет смысл после перехода на форму входа с сессионной кукой.
+#define CAPTIVE_PORTAL 0
+
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
 #include <ESP8266mDNS.h>
-#include <DNSServer.h>
+#if CAPTIVE_PORTAL
+  #include <DNSServer.h>
+#endif
 #include <EEPROM.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.2.0"
+#define FW_VERSION "1.2.1"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -502,7 +514,9 @@ void handleButton() {
 // ---------- веб ----------
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
-DNSServer dnsServer;
+#if CAPTIVE_PORTAL
+  DNSServer dnsServer;
+#endif
 const char* AUTH_USER = "admin";
 const char* MDNS_HOST = "esp-console";
 
@@ -582,7 +596,9 @@ void handleRoot() {
   server.send(302, "text/plain", "");
 }
 
-// Captive portal: подключился к точке доступа — страница открылась сама.
+// Ловит опечатки в пути на самом устройстве. При CAPTIVE_PORTAL 1 сюда же
+// приходят перехваченные через DNS проверки связи — тогда этот редирект и
+// открывает страницу настроек автоматически.
 void handleNotFound() {
   server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/settings", true);
   server.send(302, "text/plain", "");
@@ -933,8 +949,10 @@ void setup() {
     MDNS.addService("http", "tcp", 80);
   }
 
+#if CAPTIVE_PORTAL
   dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
   dnsServer.start(53, "*", WiFi.softAPIP());
+#endif
 
   telnetServer.begin();
   telnetServer.setNoDelay(true);
@@ -953,7 +971,9 @@ void setup() {
 void loop() {
   telnetTick();
   server.handleClient();
+#if CAPTIVE_PORTAL
   dnsServer.processNextRequest();
+#endif
   MDNS.update();
 
   handleButton();
