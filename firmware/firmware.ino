@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.2.1
+ * WiFi консольный сервер на ESP8266 — v1.3.0
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -22,7 +22,7 @@
  *   после 5 неудачных попыток
  * - /log: выгрузка буфера истории файлом — готовый протокол работ
  *   по железке. За авторизацией: в консоль уходят набранные пароли
- * - OLED 128x64: IP, КРУПНО текущая скорость, батарея, статус telnet.
+ * - OLED 128x32 (или 64, см. SCREEN_HEIGHT): КРУПНО скорость, IP, статус.
  *   Гаснет через 60 с простоя, будится кнопкой или подключением клиента
  *
  * ========================= СХЕМА =========================
@@ -89,7 +89,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.2.1"
+#define FW_VERSION "1.3.0"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -118,7 +118,7 @@ static inline size_t smin(size_t a, size_t b) { return a < b ? a : b; }
 
 // ---------- OLED ----------
 #define SCREEN_WIDTH  128
-#define SCREEN_HEIGHT 64
+#define SCREEN_HEIGHT 32   // 32 или 64 — разметка экрана переключается автоматически
 // Модули SSD1306 встречаются и на 0x3C, и на 0x3D — адрес подбираем сами.
 const uint8_t OLED_ADDRS[] = {0x3C, 0x3D};
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -830,10 +830,16 @@ struct ScreenState {
   uint8_t  staMode;   // 0 — не задан, 1 — нет линка, 2 — подключено
   uint8_t  pct;
   uint8_t  flags;     // bit0 telnet, bit1 break, bit2 low batt
-  uint8_t  pad;
+  uint8_t  altPhase;  // на 128x32 строка адреса чередует AP и STA
 };
 ScreenState prevScreen;
 bool prevScreenValid = false;
+
+// Правое выравнивание: ширина символа шрифта size 1 — 6 пикселей.
+void printRight(const char* s, int16_t y) {
+  display.setCursor(SCREEN_WIDTH - 6 * (int16_t)strlen(s), y);
+  display.print(s);
+}
 
 void updateOled() {
   if (!oledOk || !screenOn) return;
@@ -848,6 +854,12 @@ void updateOled() {
   if (telnetClient && telnetClient.connected())    s.flags |= 1;
   if ((int32_t)(millis() - breakFlashUntil) < 0)   s.flags |= 2;
   if (battV > 0.5f && battV < BATT_LOW_V)          s.flags |= 4;
+#if SCREEN_HEIGHT == 32
+  // Строка адреса одна, поэтому AP и STA чередуются раз в 3 секунды —
+  // и только когда домашняя сеть реально подключена. В стойке STA не
+  // задан, фаза остаётся нулевой и лишних перерисовок не возникает.
+  s.altPhase = (s.staMode == 2) ? (uint8_t)((millis() / 3000) % 2) : 0;
+#endif
 
   // Полная перерисовка — это ~1 КБ по I2C, десятки миллисекунд с
   // заблокированным мостом. Раньше она шла безусловно раз в секунду.
@@ -858,6 +870,39 @@ void updateOled() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
+  // Скорость — крупно. При первичной настройке это главный вопрос
+  // ("на чём я сейчас сижу?"), и лезть за ним в браузер неудобно.
+  char baudBuf[8];
+  snprintf(baudBuf, sizeof(baudBuf), "%lu", (unsigned long)settings.baud);
+
+#if SCREEN_HEIGHT == 32
+  // Компактная разметка. Не поместились заголовок, версия прошивки и
+  // напряжение батареи — всё это есть на /settings. На экране остаётся
+  // то, что нужно, пока стоишь у стойки: скорость, куда подключаться,
+  // есть ли сессия.
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(baudBuf);              // до 6 цифр = 72 px, справа остаётся 56
+
+  display.setTextSize(1);
+  printRight("8N1", 0);
+
+  char battBuf[8];
+  if (s.flags & 4) strcpy(battBuf, "LOW");
+  else             snprintf(battBuf, sizeof(battBuf), "%u%%", (unsigned)s.pct);
+  printRight(battBuf, 8);
+
+  display.setCursor(0, 16);
+  if (s.altPhase) {
+    display.print(F("ST "));
+    display.print(WiFi.localIP());
+  } else {
+    display.print(F("AP "));
+    display.print(WiFi.softAPIP());
+  }
+
+  const int16_t barY = 23, textY = 24;
+#else
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.print(F("ESP Console"));
@@ -874,10 +919,6 @@ void updateOled() {
   else if (s.staMode == 2) display.print(WiFi.localIP());
   else                     display.print(F("no link"));
 
-  // Скорость — крупно. При первичной настройке это главный вопрос
-  // ("на чём я сейчас сижу?"), и лезть за ним в браузер неудобно.
-  char baudBuf[8];
-  snprintf(baudBuf, sizeof(baudBuf), "%lu", (unsigned long)settings.baud);
   display.setTextSize(2);
   display.setCursor(0, 30);
   display.print(baudBuf);
@@ -894,18 +935,22 @@ void updateOled() {
   if (s.flags & 4) display.print(F("LOW!"));
   else { display.print(vBuf); display.print('V'); }
 
+  const int16_t barY = 55, textY = 56;
+#endif
+
+  // Нижняя строка одинакова для обеих разметок, отличается только высотой.
   if (s.flags & 2) {
-    display.fillRect(0, 55, SCREEN_WIDTH, 9, SSD1306_WHITE);
+    display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
-    display.setCursor(2, 56);
+    display.setCursor(2, textY);
     display.print(F("BREAK SENT"));
   } else if (s.flags & 1) {
-    display.fillRect(0, 55, SCREEN_WIDTH, 9, SSD1306_WHITE);
+    display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
-    display.setCursor(2, 56);
+    display.setCursor(2, textY);
     display.print(F("TELNET: CONNECTED"));
   } else {
-    display.setCursor(0, 56);
+    display.setCursor(0, textY);
     display.print(F("Telnet: idle"));
   }
 
