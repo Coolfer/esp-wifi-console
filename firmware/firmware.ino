@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.5.2
+ * WiFi консольный сервер на ESP8266 — v1.5.3
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.5.2"
+#define FW_VERSION "1.5.3"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -962,10 +962,15 @@ void printRight(const char* s, int16_t y, int16_t rightEdge = SCREEN_WIDTH) {
 }
 
 // Короткая метка состояния: активна — подсвечена, текст инверсный.
+// x — позиция ТЕКСТА; подложка выступает на BADGE_PAD влево и вправо.
+// Поля обязательны: при радиусе 2 срезанные углы иначе съедали бы верхние
+// пиксели букв вроде T и S, которые в строке 0 занимают всю ширину глифа.
 // padTop поднимает подложку выше текста, когда над строкой есть зазор.
+#define BADGE_PAD 2
 void badge(int16_t x, int16_t y, const char* t, bool on, int16_t padTop = 0) {
   if (on) {
-    display.fillRect(x, y - padTop, 6 * (int16_t)strlen(t), 8, SSD1306_WHITE);
+    int16_t w = 6 * (int16_t)strlen(t) + BADGE_PAD * 2;
+    display.fillRoundRect(x - BADGE_PAD, y - padTop, w, 8, 2, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
   }
   display.setCursor(x, y);
@@ -1035,9 +1040,11 @@ void updateOled() {
   // Метки подсвечиваются, когда соответствующее состояние активно:
   // AP — к точке доступа кто-то подключён, STA — домашняя сеть поднята,
   // TLNT — открыта консольная сессия.
+  // x — позиция текста, подложка шире на 2 px с каждой стороны, поэтому
+  // AP начинается с 2: её подложка занимает 0..15, STA — 20..41.
   display.setTextSize(1);
-  badge(0,  0, "AP",  s.flags & 2);
-  badge(16, 0, "STA", s.flags & 8);
+  badge(2,  0, "AP",  s.flags & 2);
+  badge(22, 0, "STA", s.flags & 8);
 
   char battBuf[8];
   if (s.flags & 4) strcpy(battBuf, "LOW");
@@ -1061,7 +1068,8 @@ void updateOled() {
     drawBaudIcon(0, textY);
     display.setCursor(14, textY);
     display.print(baudBuf);
-    badge(SCREEN_WIDTH - 24, textY, "TLNT", s.flags & 1, 1);
+    // Текст на 102, подложка с полями занимает 100..127 — впритык к краю.
+    badge(SCREEN_WIDTH - 26, textY, "TLNT", s.flags & 1, 1);
   }
 #else
   display.setTextSize(1);
