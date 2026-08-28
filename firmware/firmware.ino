@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.4.0
+ * WiFi консольный сервер на ESP8266 — v1.5.0
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -26,9 +26,10 @@
  *   после 5 неудачных попыток
  * - /log: выгрузка буфера истории файлом — готовый протокол работ
  *   по железке. За авторизацией: в консоль уходят набранные пароли
- * - OLED 128x32 (или 64, см. SCREEN_HEIGHT): КРУПНО скорость, IP, статус.
- *   Поворот на 180 градусов включается в /settings
- *   Гаснет через 60 с простоя, будится кнопкой или подключением клиента
+ * - OLED 128x32 (или 64, см. SCREEN_HEIGHT): метки AP/STA/TLNT, которые
+ *   подсвечиваются по активности, иконка батареи с уровнем заряда, КРУПНО
+ *   адрес (двойная высота) и скорость. Поворот на 180 градусов включается
+ *   в /settings. Гаснет через 60 с простоя, будится кнопкой или клиентом
  *
  * ========================= СХЕМА =========================
  *  D1 mini TX (GPIO1)  -> HW-044 TXD
@@ -45,6 +46,8 @@
  *  D1 mini D5 (GPIO14) -- тактовая кнопка -- GND
  *    короткое нажатие : экран погашен -> разбудить, иначе -> следующая скорость
  *    удержание 1 сек  : отключить telnet-клиента
+ *  После пробуждения экрана кнопка не реагирует 0.7 с — чтобы двойной
+ *  клик не проскочил в смену скорости
  *
  *  Батарея (ОБЯЗАТЕЛЬНО через делитель, НЕ на A0 напрямую!):
  *  Batt+ --[R1 100к]-- A0 --[R2 100к]-- GND
@@ -94,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.4.0"
+#define FW_VERSION "1.5.0"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -516,8 +519,10 @@ void nextBaud() {
 }
 
 // ---------- кнопка ----------
-#define BTN_DEBOUNCE 30
-#define BTN_LONG_MS  1000
+#define BTN_DEBOUNCE  30
+#define BTN_LONG_MS   1000
+#define BTN_WAKE_LOCK 700    // сколько игнорируем нажатия после пробуждения экрана
+uint32_t btnLockUntil = 0;
 bool     btnReleased = true;
 uint32_t btnDownAt = 0;
 bool     btnLongDone = false;
@@ -540,8 +545,14 @@ void handleButton() {
     if (!btnLongDone && t - btnDownAt >= BTN_DEBOUNCE) {
       // Первое нажатие при погашенном экране только будит — иначе
       // "посмотреть скорость" молча переключало бы её посреди сессии.
-      if (!screenOn) wakeScreen();
-      else nextBaud();
+      if (!screenOn) {
+        wakeScreen();
+        // Пауза после пробуждения: без неё второе нажатие в темпе двойного
+        // клика проскакивает дальше и незаметно меняет скорость.
+        btnLockUntil = t + BTN_WAKE_LOCK;
+      } else if ((int32_t)(t - btnLockUntil) >= 0) {
+        nextBaud();
+      }
     }
   }
 }
@@ -933,11 +944,9 @@ struct ScreenState {
   uint32_t baud;
   uint8_t  staMode;   // 0 выкл, 1 поиск, 2 подключено, 3 сеть не найдена
   uint8_t  pct;
-  uint8_t  flags;     // bit0 telnet, bit2 низкий заряд
-  uint8_t  altPhase;  // на 128x32 строка адреса чередует AP и STA
+  uint8_t  flags;     // bit0 telnet, bit1 клиенты AP, bit2 низкий заряд, bit3 STA поднят
   uint8_t  notice;    // 0, NOTICE_BREAK или NOTICE_KICK
-  uint8_t  pad[3];    // явное выравнивание: memcmp сравнивает всю структуру
-};
+};                    // 3×uint32 + 4×uint8 = ровно 16 байт, дыр для memcmp нет
 ScreenState prevScreen;
 bool prevScreenValid = false;
 
@@ -947,9 +956,28 @@ void applyScreenRotation() {
 }
 
 // Правое выравнивание: ширина символа шрифта size 1 — 6 пикселей.
-void printRight(const char* s, int16_t y) {
-  display.setCursor(SCREEN_WIDTH - 6 * (int16_t)strlen(s), y);
+void printRight(const char* s, int16_t y, int16_t rightEdge = SCREEN_WIDTH) {
+  display.setCursor(rightEdge - 6 * (int16_t)strlen(s), y);
   display.print(s);
+}
+
+// Короткая метка состояния: активна — подсвечена, текст инверсный.
+void badge(int16_t x, int16_t y, const char* t, bool on) {
+  if (on) {
+    display.fillRect(x, y, 6 * (int16_t)strlen(t), 8, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  }
+  display.setCursor(x, y);
+  display.print(t);
+  display.setTextColor(SSD1306_WHITE);
+}
+
+// Батарейка 15x7: корпус, контакт справа, заполнение по уровню заряда.
+void drawBattery(int16_t x, int16_t y, uint8_t pct) {
+  display.drawRect(x, y, 13, 7, SSD1306_WHITE);
+  display.fillRect(x + 13, y + 2, 2, 3, SSD1306_WHITE);
+  uint8_t w = (uint8_t)((uint16_t)pct * 11 / 100);
+  if (w) display.fillRect(x + 1, y + 1, w, 5, SSD1306_WHITE);
 }
 
 void updateOled() {
@@ -966,13 +994,9 @@ void updateOled() {
   s.pct     = batteryPercent(battV);
   s.notice  = activeNotice();
   if (telnetClient && telnetClient.connected())    s.flags |= 1;
+  if (WiFi.softAPgetStationNum() > 0)              s.flags |= 2;
   if (battV > 0.5f && battV < BATT_LOW_V)          s.flags |= 4;
-#if SCREEN_HEIGHT == 32
-  // Строка адреса одна, поэтому AP и STA чередуются раз в 3 секунды —
-  // но только если домашняя сеть вообще задана. В стойке SSID пустой,
-  // фаза остаётся нулевой и лишних перерисовок не возникает.
-  s.altPhase = (s.staMode != 0) ? (uint8_t)((millis() / 3000) % 2) : 0;
-#endif
+  if (s.staMode == 2)                              s.flags |= 8;
 
   // Полная перерисовка — это ~1 КБ по I2C, десятки миллисекунд с
   // заблокированным мостом. Раньше она шла безусловно раз в секунду.
@@ -989,34 +1013,41 @@ void updateOled() {
   snprintf(baudBuf, sizeof(baudBuf), "%lu", (unsigned long)settings.baud);
 
 #if SCREEN_HEIGHT == 32
-  // Компактная разметка. Не поместились заголовок, версия прошивки и
-  // напряжение батареи — всё это есть на /settings. На экране остаётся
-  // то, что нужно, пока стоишь у стойки: скорость, куда подключаться,
-  // есть ли сессия.
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(baudBuf);              // до 6 цифр = 72 px, справа остаётся 56
-
+  // Три ряда по 8 / 16 / 8 пикселей — ровно 32.
+  //
+  //  AP STA TLNT          87% [==  ]   ряд меток и батарейка
+  //  192.168.1.150                     адрес двойной высоты
+  //  BR 115200                         скорость, либо инверсное уведомление
+  //
+  // Метки подсвечиваются, когда соответствующее состояние активно:
+  // AP — к точке доступа кто-то подключён, STA — домашняя сеть поднята,
+  // TLNT — открыта консольная сессия.
   display.setTextSize(1);
-  printRight("8N1", 0);
+  badge(0,  0, "AP",   s.flags & 2);
+  badge(16, 0, "STA",  s.flags & 8);
+  badge(38, 0, "TLNT", s.flags & 1);
 
   char battBuf[8];
   if (s.flags & 4) strcpy(battBuf, "LOW");
   else             snprintf(battBuf, sizeof(battBuf), "%u%%", (unsigned)s.pct);
-  printRight(battBuf, 8);
+  printRight(battBuf, 0, 109);      // слева от иконки, та занимает 113..127
+  drawBattery(113, 0, s.pct);
 
-  display.setCursor(0, 16);
-  if (s.altPhase) {
-    display.print(F("ST "));
-    if (s.staMode == 2)      display.print(WiFi.localIP());
-    else if (s.staMode == 3) display.print(F("no network"));
-    else                     display.print(F("connecting"));
-  } else {
-    display.print(F("AP "));
-    display.print(WiFi.softAPIP());
+  // Полноразмерный size 2 не подходит: 13 символов по 12 px это 156 при
+  // ширине 128. Двойная высота при обычной ширине даёт крупный адрес,
+  // который влезает при любом IPv4.
+  display.setTextSize(1, 2);
+  display.setCursor(0, 8);
+  if (s.flags & 8) display.print(WiFi.localIP());   // STA поднят — показываем его
+  else             display.print(WiFi.softAPIP());  // иначе адрес точки доступа
+  display.setTextSize(1);
+
+  const int16_t barY = 24, textY = 24;
+  if (!s.notice) {
+    display.setCursor(0, textY);
+    display.print(F("BR "));
+    display.print(baudBuf);
   }
-
-  const int16_t barY = 23, textY = 24;
 #else
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -1039,8 +1070,6 @@ void updateOled() {
   display.setCursor(0, 30);
   display.print(baudBuf);
   display.setTextSize(1);
-  display.setCursor(strlen(baudBuf) * 12 + 4, 38);
-  display.print(F("8N1"));
 
   char vBuf[8];
   dtostrf(battV, 4, 2, vBuf);
@@ -1054,21 +1083,27 @@ void updateOled() {
   const int16_t barY = 55, textY = 56;
 #endif
 
-  // Нижняя строка одинакова для обеих разметок, отличается только высотой.
+  // Уведомление перекрывает нижнюю строку в обеих разметках.
   if (s.notice) {
-    display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
+    display.fillRect(0, barY, SCREEN_WIDTH, SCREEN_HEIGHT - barY, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
     display.setCursor(2, textY);
     display.print(s.notice == NOTICE_BREAK ? F("BREAK SENT") : F("CLIENT KICKED"));
-  } else if (s.flags & 1) {
+    display.setTextColor(SSD1306_WHITE);
+  }
+#if SCREEN_HEIGHT != 32
+  // На 128x32 состояние сессии показывает метка TLNT, отдельная строка не нужна.
+  else if (s.flags & 1) {
     display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
     display.setCursor(2, textY);
     display.print(F("TELNET: CONNECTED"));
+    display.setTextColor(SSD1306_WHITE);
   } else {
     display.setCursor(0, textY);
     display.print(F("Telnet: idle"));
   }
+#endif
 
   display.display();
 }
