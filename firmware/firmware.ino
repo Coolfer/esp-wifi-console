@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.5.3
+ * WiFi консольный сервер на ESP8266 — v1.6.0
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.5.3"
+#define FW_VERSION "1.6.0"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -955,6 +955,52 @@ void applyScreenRotation() {
   prevScreenValid = false;   // разметка сменилась — перерисовать принудительно
 }
 
+// ---------- заставка ----------
+// Заливка целиком (заодно видно все пиксели матрицы), затем бегущая строка.
+// Крутится из loop(), а не задержками в setup(): железка может печатать
+// прямо во время старта, и терять её вывод ради анимации незачем.
+#define SPLASH_FILL_MS  400
+#define SPLASH_STEP_MS  25
+#define SPLASH_STEP_PX  4
+#define SPLASH_TEXT_W   (11 * 12)   // "ESP CONSOLE" шрифтом size 2
+
+enum SplashState { SPLASH_FILL, SPLASH_SCROLL, SPLASH_OFF };
+SplashState splashState = SPLASH_OFF;
+uint32_t    splashAt = 0;
+int16_t     splashX  = SCREEN_WIDTH;
+
+void splashTick() {
+  if (splashState == SPLASH_OFF) return;
+  if (!oledOk) { splashState = SPLASH_OFF; return; }
+
+  uint32_t now = millis();
+
+  if (splashState == SPLASH_FILL) {
+    if (now - splashAt < SPLASH_FILL_MS) return;
+    splashState = SPLASH_SCROLL;
+    splashX = SCREEN_WIDTH;
+    splashAt = now;
+    return;
+  }
+
+  if (now - splashAt < SPLASH_STEP_MS) return;
+  splashAt = now;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(splashX, (SCREEN_HEIGHT - 16) / 2);
+  display.print(F("ESP CONSOLE"));
+  display.setTextSize(1);
+  display.display();
+
+  splashX -= SPLASH_STEP_PX;
+  if (splashX < -SPLASH_TEXT_W) {     // строка ушла за левый край
+    splashState = SPLASH_OFF;
+    prevScreenValid = false;          // вернуть обычную картинку
+  }
+}
+
 // Правое выравнивание: ширина символа шрифта size 1 — 6 пикселей.
 void printRight(const char* s, int16_t y, int16_t rightEdge = SCREEN_WIDTH) {
   display.setCursor(rightEdge - 6 * (int16_t)strlen(s), y);
@@ -999,7 +1045,7 @@ void drawBattery(int16_t x, int16_t y, uint8_t pct) {
 }
 
 void updateOled() {
-  if (!oledOk || !screenOn) return;
+  if (!oledOk || !screenOn || splashState != SPLASH_OFF) return;
 
   ScreenState s;
   memset(&s, 0, sizeof(s));
@@ -1152,8 +1198,12 @@ void setup() {
     oledOk = display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
     if (oledOk) {
       applyScreenRotation();
-      display.clearDisplay();
+      // Заставка: сначала заливка целиком — она же проверка матрицы,
+      // сразу видно реальные границы активной области.
+      display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
       display.display();
+      splashState = SPLASH_FILL;
+      splashAt = millis();
     }
   }
 #if DEBUG_SERIAL
@@ -1205,6 +1255,8 @@ void loop() {
     pendingApReconfig = false;
     applyApConfig();
   }
+
+  splashTick();
 
   static uint32_t lastOled = 0;
   uint32_t now = millis();
