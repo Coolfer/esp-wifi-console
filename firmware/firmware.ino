@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.5.0
+ * WiFi консольный сервер на ESP8266 — v1.5.1
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.5.0"
+#define FW_VERSION "1.5.1"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -1037,7 +1037,7 @@ void updateOled() {
   // ширине 128. Двойная высота при обычной ширине даёт крупный адрес,
   // который влезает при любом IPv4.
   display.setTextSize(1, 2);
-  display.setCursor(0, 8);
+  display.setCursor(0, 9);   // 1 px отступа от метки: вплотную они слипаются
   if (s.flags & 8) display.print(WiFi.localIP());   // STA поднят — показываем его
   else             display.print(WiFi.softAPIP());  // иначе адрес точки доступа
   display.setTextSize(1);
