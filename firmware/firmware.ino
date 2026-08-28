@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.6.0
+ * WiFi консольный сервер на ESP8266 — v1.6.1
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.6.0"
+#define FW_VERSION "1.6.1"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -959,7 +959,7 @@ void applyScreenRotation() {
 // Заливка целиком (заодно видно все пиксели матрицы), затем бегущая строка.
 // Крутится из loop(), а не задержками в setup(): железка может печатать
 // прямо во время старта, и терять её вывод ради анимации незачем.
-#define SPLASH_FILL_MS  400
+#define SPLASH_FILL_MS  700
 #define SPLASH_STEP_MS  25
 #define SPLASH_STEP_PX  4
 #define SPLASH_TEXT_W   (11 * 12)   // "ESP CONSOLE" шрифтом size 2
@@ -976,6 +976,15 @@ void splashTick() {
   uint32_t now = millis();
 
   if (splashState == SPLASH_FILL) {
+    // splashAt == 0 значит "ещё не рисовали". Заливку выводим здесь, а не
+    // в setup(): сразу после begin() зарядовый насос SSD1306 ещё выходит
+    // на режим и первый кадр на панели не появляется.
+    if (splashAt == 0) {
+      display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+      display.display();
+      splashAt = now ? now : 1;
+      return;
+    }
     if (now - splashAt < SPLASH_FILL_MS) return;
     splashState = SPLASH_SCROLL;
     splashX = SCREEN_WIDTH;
@@ -1198,12 +1207,12 @@ void setup() {
     oledOk = display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
     if (oledOk) {
       applyScreenRotation();
-      // Заставка: сначала заливка целиком — она же проверка матрицы,
-      // сразу видно реальные границы активной области.
-      display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+      display.clearDisplay();
       display.display();
+      // Саму заставку рисует splashTick() на первом проходе loop() —
+      // к тому моменту панель уже гарантированно вышла на режим.
       splashState = SPLASH_FILL;
-      splashAt = millis();
+      splashAt = 0;
     }
   }
 #if DEBUG_SERIAL
