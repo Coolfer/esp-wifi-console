@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.5.1
+ * WiFi консольный сервер на ESP8266 — v1.5.2
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.5.1"
+#define FW_VERSION "1.5.2"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -962,14 +962,27 @@ void printRight(const char* s, int16_t y, int16_t rightEdge = SCREEN_WIDTH) {
 }
 
 // Короткая метка состояния: активна — подсвечена, текст инверсный.
-void badge(int16_t x, int16_t y, const char* t, bool on) {
+// padTop поднимает подложку выше текста, когда над строкой есть зазор.
+void badge(int16_t x, int16_t y, const char* t, bool on, int16_t padTop = 0) {
   if (on) {
-    display.fillRect(x, y, 6 * (int16_t)strlen(t), 8, SSD1306_WHITE);
+    display.fillRect(x, y - padTop, 6 * (int16_t)strlen(t), 8, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
   }
   display.setCursor(x, y);
   display.print(t);
   display.setTextColor(SSD1306_WHITE);
+}
+
+// Иконка скорости линии: пачка импульсов, как на осциллограмме UART.
+// Занимает 11x7 пикселей.
+void drawBaudIcon(int16_t x, int16_t y) {
+  display.drawFastHLine(x,     y + 6, 3, SSD1306_WHITE);
+  display.drawFastVLine(x + 2, y,     7, SSD1306_WHITE);
+  display.drawFastHLine(x + 3, y,     3, SSD1306_WHITE);
+  display.drawFastVLine(x + 5, y,     7, SSD1306_WHITE);
+  display.drawFastHLine(x + 6, y + 6, 3, SSD1306_WHITE);
+  display.drawFastVLine(x + 8, y,     7, SSD1306_WHITE);
+  display.drawFastHLine(x + 9, y,     2, SSD1306_WHITE);
 }
 
 // Батарейка 15x7: корпус, контакт справа, заполнение по уровню заряда.
@@ -1023,9 +1036,8 @@ void updateOled() {
   // AP — к точке доступа кто-то подключён, STA — домашняя сеть поднята,
   // TLNT — открыта консольная сессия.
   display.setTextSize(1);
-  badge(0,  0, "AP",   s.flags & 2);
-  badge(16, 0, "STA",  s.flags & 8);
-  badge(38, 0, "TLNT", s.flags & 1);
+  badge(0,  0, "AP",  s.flags & 2);
+  badge(16, 0, "STA", s.flags & 8);
 
   char battBuf[8];
   if (s.flags & 4) strcpy(battBuf, "LOW");
@@ -1042,11 +1054,14 @@ void updateOled() {
   else             display.print(WiFi.softAPIP());  // иначе адрес точки доступа
   display.setTextSize(1);
 
-  const int16_t barY = 24, textY = 24;
+  // Нижняя строка сдвинута на 25: два пикселя зазора (23 и 24) вместо
+  // одного — вплотную к адресу двойной высоты она читалась слитно.
+  const int16_t barY = 24, textY = 25;
   if (!s.notice) {
-    display.setCursor(0, textY);
-    display.print(F("BR "));
+    drawBaudIcon(0, textY);
+    display.setCursor(14, textY);
     display.print(baudBuf);
+    badge(SCREEN_WIDTH - 24, textY, "TLNT", s.flags & 1, 1);
   }
 #else
   display.setTextSize(1);
