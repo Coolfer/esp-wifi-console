@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.3.0
+ * WiFi консольный сервер на ESP8266 — v1.4.0
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -9,20 +9,25 @@
  * - Telnet-мост на порту 23, корректный разбор IAC, экранирование 0xFF
  * - Буфер истории 8 КБ: то, что железка напечатала ДО подключения
  *   клиента, не теряется и отдаётся сразу при коннекте
- * - BREAK: по IAC BRK из telnet-клиента (PuTTY: Special Command -> Break)
- *   и долгим нажатием кнопки. Нужен для rommon/BootROM и сброса пароля
+ * - BREAK: по IAC BRK из telnet-клиента (PuTTY: Special Command -> Break).
+ *   Нужен для rommon/BootROM и сброса пароля. С кнопки убран — там теперь
+ *   отключение зависшего клиента, которое требуется чаще
  * - Смена скорости БЕЗ перезагрузки ESP: кнопкой по кругу или в /settings.
  *   Прошивка вообще не вызывает ESP.restart() — каждая перезагрузка
  *   отправляет бутлоадерный мусор в консоль подопытного устройства
  * - Новый telnet-клиент вытесняет старого (роуминг по стойке рвёт TCP,
  *   а отказ в подключении заблокировал бы вас же до перезагрузки)
- * - AP всегда; STA поднимается только если задан домашний SSID
+ * - AP поднята всегда — это гарантированный вход. STA в приоритете: если
+ *   домашняя сеть задана, прошивка подключается к ней, а не найдя за 25 с,
+ *   гасит радио STA и работает только точкой доступа, повторяя попытку
+ *   раз в 5 минут (но не посреди telnet-сессии — см. staTick)
  * - mDNS: esp-console.local (captive portal выключен, см. CAPTIVE_PORTAL)
  * - Веб-интерфейс /settings и OTA /update за Basic Auth с блокировкой
  *   после 5 неудачных попыток
  * - /log: выгрузка буфера истории файлом — готовый протокол работ
  *   по железке. За авторизацией: в консоль уходят набранные пароли
  * - OLED 128x32 (или 64, см. SCREEN_HEIGHT): КРУПНО скорость, IP, статус.
+ *   Поворот на 180 градусов включается в /settings
  *   Гаснет через 60 с простоя, будится кнопкой или подключением клиента
  *
  * ========================= СХЕМА =========================
@@ -37,9 +42,9 @@
  *  D1 mini G               -> OLED GND
  *
  *  Кнопка (ОПЦИОНАЛЬНО, без неё всё работает — пин подтянут внутрь):
- *  D1 mini D7 (GPIO13) -- тактовая кнопка -- GND
+ *  D1 mini D5 (GPIO14) -- тактовая кнопка -- GND
  *    короткое нажатие : экран погашен -> разбудить, иначе -> следующая скорость
- *    удержание 1 сек  : отправить BREAK в консоль
+ *    удержание 1 сек  : отключить telnet-клиента
  *
  *  Батарея (ОБЯЗАТЕЛЬНО через делитель, НЕ на A0 напрямую!):
  *  Batt+ --[R1 100к]-- A0 --[R2 100к]-- GND
@@ -89,7 +94,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.3.0"
+#define FW_VERSION "1.4.0"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -106,14 +111,14 @@
 #ifndef D2
   #define D2 4
 #endif
-#ifndef D7
-  #define D7 13
+#ifndef D5
+  #define D5 14
 #endif
 
 static inline size_t smin(size_t a, size_t b) { return a < b ? a : b; }
 
 // ---------- пины ----------
-#define PIN_BUTTON  D7   // GPIO13, кнопка на GND; не распаяна -> всегда HIGH
+#define PIN_BUTTON  D5   // GPIO14, кнопка на GND; не распаяна -> всегда HIGH
 #define PIN_UART_TX 1    // GPIO1, временно отцепляется от UART0 ради BREAK
 
 // ---------- OLED ----------
@@ -167,7 +172,11 @@ struct Settings {
   char     staPass[64];
   uint32_t baud;
   char     pin[9];
-  uint8_t  reserved[16];
+  // Взято из бывшего reserved[16]: размер и смещения полей не изменились,
+  // поэтому SETTINGS_VERSION поднимать не нужно и настройки переживут
+  // обновление. В старых образах здесь ноль, то есть поворот выключен.
+  uint8_t  flipScreen;   // 0 — обычная ориентация, 1 — поворот на 180°
+  uint8_t  reserved[15];
 };
 const int EEPROM_SIZE = 256;
 Settings settings;
@@ -303,9 +312,25 @@ void historyPush(const uint8_t* d, size_t n) {
 // автозагрузки на большинстве МСЭ — всё это делается сигналом BREAK.
 // TTL LOW на TX -> на выходе MAX3232 положительное напряжение (SPACE),
 // удержание SPACE дольше длительности символа и есть break condition.
-uint32_t breakFlashUntil = 0;
+// Короткое уведомление в нижней строке экрана: одно место вместо
+// отдельного флага на каждое событие.
+#define NOTICE_BREAK 1
+#define NOTICE_KICK  2
+uint8_t  noticeKind  = 0;
+uint32_t noticeUntil = 0;
 
-void serialToHistory();   // объявление: нужна ниже по тексту, а вызывается здесь
+void showNotice(uint8_t kind, uint16_t ms = 1500) {
+  noticeKind  = kind;
+  noticeUntil = millis() + ms;
+  wakeScreen();
+}
+uint8_t activeNotice() {
+  return (noticeKind && (int32_t)(millis() - noticeUntil) < 0) ? noticeKind : 0;
+}
+
+// Объявления: определены ниже по тексту, а вызываются выше.
+void serialToHistory();
+void applyScreenRotation();
 
 void sendBreak(uint16_t ms) {
   Serial.flush();
@@ -319,8 +344,7 @@ void sendBreak(uint16_t ms) {
   // иначе теряется ровно то, ради чего break и посылался.
   serialToHistory();
   Serial.begin(currentSerialBaud()); // begin() возвращает пин под UART0
-  breakFlashUntil = millis() + 1500;
-  wakeScreen();
+  showNotice(NOTICE_BREAK);
   DBG("BREAK отправлен");
 }
 
@@ -466,6 +490,17 @@ void telnetTick() {
   }
 }
 
+// Принудительный сброс сессии с кнопки. Нужен, когда клиент завис в
+// полуоткрытом TCP и вы хотите освободить порт, не дожидаясь таймаута.
+void kickTelnet() {
+  if (telnetClient && telnetClient.connected()) {
+    telnetClient.print(F("\r\n[disconnected by device]\r\n"));
+    telnetClient.stop();
+    DBG("Telnet: клиент отключён кнопкой");
+  }
+  showNotice(NOTICE_KICK);
+}
+
 // ---------- скорость ----------
 void applyBaud(uint32_t b) {
   if (!baudIsValid(b) || b == settings.baud) return;
@@ -498,7 +533,7 @@ void handleButton() {
   } else if (!btnReleased && !up) {
     if (!btnLongDone && t - btnDownAt >= BTN_LONG_MS) {
       btnLongDone = true;
-      sendBreak(300);
+      kickTelnet();
     }
   } else if (!btnReleased && up) {
     btnReleased = true;
@@ -644,6 +679,11 @@ void handleSettingsGet() {
   }
   emit(F("</select></fieldset>"));
 
+  emit(F("<fieldset><legend>Экран</legend>"
+    "<label><input class='chk' type='checkbox' name='flip' value='1'"));
+  if (settings.flipScreen) emit(F(" checked"));
+  emit(F(">Перевернуть на 180&deg; (применяется сразу)</label></fieldset>"));
+
   // Пароли больше не подставляются в value: страница с открытым паролем
   // от домашнего WiFi — плохая идея на устройстве с обычным HTTP.
   emit(F("<fieldset><legend>Точка доступа устройства</legend>"
@@ -719,17 +759,74 @@ void handleLog() {
 bool     pendingApReconfig = false;
 uint32_t pendingApAt = 0;
 
-void applyStaConfig() {
-  if (strlen(settings.staSsid) > 0) {
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.begin(settings.staSsid, strlen(settings.staPass) ? settings.staPass : nullptr);
-  } else {
-    // В стойке STA не нужен никогда, а включённый режим — это лишнее
-    // радио и лишнее сканирование за счёт батареи.
-    WiFi.disconnect(false);
-    WiFi.mode(WIFI_AP);
+// ---------- STA: приоритет домашней сети, откат на AP ----------
+// Точка доступа поднята всегда — это единственный гарантированный вход,
+// её мы не выключаем ни при каких обстоятельствах. STA поднимается при
+// первой возможности; если сеть не нашлась за отведённое окно, радио STA
+// выключается совсем (чтобы не сканировать эфир впустую за счёт батареи),
+// и попытка повторяется раз в STA_RETRY_INTERVAL.
+enum StaState { STA_DISABLED, STA_TRYING, STA_UP, STA_FALLBACK };
+StaState staState   = STA_DISABLED;
+uint32_t staStateAt = 0;
+
+#define STA_CONNECT_WINDOW 25000UL    // сколько ждём ассоциации
+#define STA_RETRY_INTERVAL 300000UL   // пауза между попытками, 5 минут
+
+void staBeginAttempt() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(settings.staSsid, strlen(settings.staPass) ? settings.staPass : nullptr);
+  staState   = STA_TRYING;
+  staStateAt = millis();
+}
+
+void staStop() {
+  WiFi.disconnect(true);   // выключает радио STA; persistent(false) — флеш не трогается
+  WiFi.mode(WIFI_AP);
+  staState   = STA_DISABLED;
+  staStateAt = millis();
+}
+
+void staTick() {
+  if (strlen(settings.staSsid) == 0) {
+    if (staState != STA_DISABLED) staStop();
+    return;
+  }
+
+  uint32_t now = millis();
+  switch (staState) {
+    case STA_DISABLED:                 // сеть задана, STA ещё не поднимался
+      staBeginAttempt();
+      break;
+
+    case STA_TRYING:
+      if (WiFi.status() == WL_CONNECTED) {
+        staState = STA_UP;  staStateAt = now;  wakeScreen();
+      } else if (now - staStateAt > STA_CONNECT_WINDOW) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_AP);            // откат: работаем только точкой доступа
+        staState = STA_FALLBACK;  staStateAt = now;  wakeScreen();
+      }
+      break;
+
+    case STA_UP:
+      if (WiFi.status() != WL_CONNECTED) {   // связь пропала — пробуем снова
+        staState = STA_TRYING;  staStateAt = now;  wakeScreen();
+      }
+      break;
+
+    case STA_FALLBACK:
+      if (now - staStateAt < STA_RETRY_INTERVAL) break;
+      // Успешное подключение STA переводит точку доступа на канал домашней
+      // сети и рвёт всех её клиентов. Посреди работы с консолью это
+      // недопустимо, поэтому попытку откладываем до конца сессии.
+      if (telnetClient && telnetClient.connected()) { staStateAt = now; break; }
+      staBeginAttempt();
+      break;
   }
 }
+
+// Настройки изменились — пересобрать состояние с нуля, дальше решит staTick().
+void applyStaConfig() { staStop(); }
 
 void applyApConfig() {
   WiFi.softAP(settings.apSsid, strlen(settings.apPass) ? settings.apPass : nullptr);
@@ -739,9 +836,10 @@ void setupWifi() {
   // persistent(false): иначе core пишет учётки во flash при каждом begin()
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
-  applyStaConfig();            // заодно выставляет WIFI_AP или WIFI_AP_STA
+  WiFi.mode(WIFI_AP);          // точка доступа поднимается первой и всегда
   WiFi.setOutputPower(12.0);   // дистанция "рука — сумка", 20.5 dBm ни к чему
   applyApConfig();
+  staState = STA_DISABLED;     // staTick() поднимет STA, если он задан
 }
 
 void handleSettingsPost() {
@@ -806,6 +904,12 @@ void handleSettingsPost() {
     httpUpdater.updateCredentials(AUTH_USER, settings.pin);
   }
 
+  uint8_t flip = server.hasArg("flip") ? 1 : 0;
+  if (settings.flipScreen != flip) {
+    settings.flipScreen = flip;
+    applyScreenRotation();
+  }
+
   applyBaud(newBaud);
   saveSettingsNow();
 
@@ -827,13 +931,20 @@ struct ScreenState {
   uint32_t apIp;
   uint32_t staIp;
   uint32_t baud;
-  uint8_t  staMode;   // 0 — не задан, 1 — нет линка, 2 — подключено
+  uint8_t  staMode;   // 0 выкл, 1 поиск, 2 подключено, 3 сеть не найдена
   uint8_t  pct;
-  uint8_t  flags;     // bit0 telnet, bit1 break, bit2 low batt
+  uint8_t  flags;     // bit0 telnet, bit2 низкий заряд
   uint8_t  altPhase;  // на 128x32 строка адреса чередует AP и STA
+  uint8_t  notice;    // 0, NOTICE_BREAK или NOTICE_KICK
+  uint8_t  pad[3];    // явное выравнивание: memcmp сравнивает всю структуру
 };
 ScreenState prevScreen;
 bool prevScreenValid = false;
+
+void applyScreenRotation() {
+  if (oledOk) display.setRotation(settings.flipScreen ? 2 : 0);
+  prevScreenValid = false;   // разметка сменилась — перерисовать принудительно
+}
 
 // Правое выравнивание: ширина символа шрифта size 1 — 6 пикселей.
 void printRight(const char* s, int16_t y) {
@@ -849,16 +960,18 @@ void updateOled() {
   s.apIp    = (uint32_t)WiFi.softAPIP();
   s.staIp   = (uint32_t)WiFi.localIP();
   s.baud    = settings.baud;
-  s.staMode = (strlen(settings.staSsid) == 0) ? 0 : (WiFi.status() == WL_CONNECTED ? 2 : 1);
+  s.staMode = (strlen(settings.staSsid) == 0) ? 0
+            : (staState == STA_UP)            ? 2
+            : (staState == STA_FALLBACK)      ? 3 : 1;
   s.pct     = batteryPercent(battV);
+  s.notice  = activeNotice();
   if (telnetClient && telnetClient.connected())    s.flags |= 1;
-  if ((int32_t)(millis() - breakFlashUntil) < 0)   s.flags |= 2;
   if (battV > 0.5f && battV < BATT_LOW_V)          s.flags |= 4;
 #if SCREEN_HEIGHT == 32
   // Строка адреса одна, поэтому AP и STA чередуются раз в 3 секунды —
-  // и только когда домашняя сеть реально подключена. В стойке STA не
-  // задан, фаза остаётся нулевой и лишних перерисовок не возникает.
-  s.altPhase = (s.staMode == 2) ? (uint8_t)((millis() / 3000) % 2) : 0;
+  // но только если домашняя сеть вообще задана. В стойке SSID пустой,
+  // фаза остаётся нулевой и лишних перерисовок не возникает.
+  s.altPhase = (s.staMode != 0) ? (uint8_t)((millis() / 3000) % 2) : 0;
 #endif
 
   // Полная перерисовка — это ~1 КБ по I2C, десятки миллисекунд с
@@ -895,7 +1008,9 @@ void updateOled() {
   display.setCursor(0, 16);
   if (s.altPhase) {
     display.print(F("ST "));
-    display.print(WiFi.localIP());
+    if (s.staMode == 2)      display.print(WiFi.localIP());
+    else if (s.staMode == 3) display.print(F("no network"));
+    else                     display.print(F("connecting"));
   } else {
     display.print(F("AP "));
     display.print(WiFi.softAPIP());
@@ -917,7 +1032,8 @@ void updateOled() {
   display.print(F("STA "));
   if (s.staMode == 0)      display.print(F("off"));
   else if (s.staMode == 2) display.print(WiFi.localIP());
-  else                     display.print(F("no link"));
+  else if (s.staMode == 3) display.print(F("no network"));
+  else                     display.print(F("connecting"));
 
   display.setTextSize(2);
   display.setCursor(0, 30);
@@ -939,11 +1055,11 @@ void updateOled() {
 #endif
 
   // Нижняя строка одинакова для обеих разметок, отличается только высотой.
-  if (s.flags & 2) {
+  if (s.notice) {
     display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
     display.setCursor(2, textY);
-    display.print(F("BREAK SENT"));
+    display.print(s.notice == NOTICE_BREAK ? F("BREAK SENT") : F("CLIENT KICKED"));
   } else if (s.flags & 1) {
     display.fillRect(0, barY, SCREEN_WIDTH, 9, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
@@ -977,6 +1093,7 @@ void setup() {
   if (oledAddr) {
     oledOk = display.begin(SSD1306_SWITCHCAPVCC, oledAddr);
     if (oledOk) {
+      applyScreenRotation();
       display.clearDisplay();
       display.display();
     }
@@ -1022,6 +1139,7 @@ void loop() {
   MDNS.update();
 
   handleButton();
+  staTick();
   sampleBattery();
   flushSettings();
 
