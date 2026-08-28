@@ -1,5 +1,5 @@
 /*
- * WiFi консольный сервер на ESP8266 — v1.6.2
+ * WiFi консольный сервер на ESP8266 — v1.6.3
  *
  * Назначение: первичная настройка коммутаторов и МСЭ. Устройство лежит
  * в сумке и достаётся под задачу — "подключиться к незнакомой железке
@@ -97,7 +97,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define FW_VERSION "1.6.2"
+#define FW_VERSION "1.6.3"
 
 // ---------- отладка (только на этапе сборки, без HW-044 на TX/RX) ----------
 #define DEBUG_SERIAL 0   // поставь 1 для первой прошивки/проверки
@@ -728,9 +728,16 @@ void handleSettingsGet() {
 
   emit(F("<p class='sys'>Прошивка " FW_VERSION " &middot; uptime "));
   emit(uptimeStr());
-  emit(F(" &middot; свободно RAM "));
+  // Для TLS важен не суммарный объём, а наибольший непрерывный блок:
+  // BearSSL просит его одним куском. Фрагментация растёт от String
+  // в веб-сервере, поэтому смотреть надо после нескольких часов работы.
+  emit(F(" &middot; RAM "));
   emit((uint32_t)ESP.getFreeHeap());
-  emit(F(" Б &middot; батарея "));
+  emit(F(" Б, макс. блок "));
+  emit((uint32_t)ESP.getMaxFreeBlockSize());
+  emit(F(" Б, фрагментация "));
+  emit((uint32_t)ESP.getHeapFragmentation());
+  emit(F("% &middot; батарея "));
   emit((uint32_t)batteryPercent(battV));
   emit(F("%</p></body></html>"));
 
