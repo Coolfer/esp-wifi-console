@@ -977,8 +977,8 @@ void splashTick() {
 
   if (splashState == SPLASH_FILL) {
     // splashAt == 0 значит "ещё не рисовали". Заливку выводим здесь, а не
-    // в setup(): сразу после begin() зарядовый насос SSD1306 ещё выходит
-    // на режим и первый кадр на панели не появляется.
+    // в setup(), просто чтобы она попадала на экран после полной
+    // инициализации и её длительность не съедалась поднятием WiFi.
     if (splashAt == 0) {
       display.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
       display.display();
